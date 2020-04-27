@@ -1,16 +1,19 @@
-import asyncio
 import dataclasses
 import json
-import logging
 from typing import List
-from azure.eventhub import EventHubClientAsync, EventData, EventHubClient
+from azure.eventhub import EventData, EventHubClient
 from fastavro import writer, parse_schema
 
 from sensorizer.data_classes import TimeserieRecord
 
 
 class QueueInterface:
+    counter: int
+
     def send(self, events: List[TimeserieRecord]):
+        pass
+
+    def batch_send(self, events: List[TimeserieRecord]):
         pass
 
 
@@ -19,33 +22,16 @@ class QueueEventHub(QueueInterface):
         self.address = address
         self.user = user
         self.key = key
-
+        self.counter = 0
         self.client_batch = EventHubClient(
             self.address, debug=False, username=self.user, password=self.key
         )
         self.sender = self.client_batch.add_sender()
         self.client_batch.run()
 
-    def async_send(self, events: List[TimeserieRecord]):
-        client = EventHubClientAsync(
-            self.address, debug=True, username=self.user, password=self.key
-        )
-
-        async def run():
-            sender = client.add_async_sender()
-            await client.run_async()
-            for event in events:
-                data = EventData(str(event))
-                await sender.send(data)
-
-        loop = asyncio.get_event_loop()
-        tasks = asyncio.gather(run())
-        loop.run_until_complete(tasks)
-        loop.run_until_complete(client.stop_async())
-        loop.close()
-
     def batch_send(self, events: List[TimeserieRecord]):
-        data = EventData(batch=[json.dumps(dataclasses.asdict(e)) for e in events])
+        self.counter += len(events)
+        data = EventData(batch=[json.dumps(dataclasses.asdict(e)) for e in events if e])
         self.sender.transfer(data)
         self.sender.wait()
 
@@ -60,8 +46,10 @@ class QueueLocalAvro(QueueInterface):
     def __init__(self, filepath: str):
         self.filepath = filepath
 
-    def send(self, events: List[TimeserieRecord]):
+    def batch_send(self, events: List[TimeserieRecord]):
+        self.send(events)
 
+    def send(self, events: List[TimeserieRecord]):
         schema = {
             "doc": "A sensor document",
             "name": "Sensor",
@@ -74,11 +62,10 @@ class QueueLocalAvro(QueueInterface):
                 {"name": "timestamp", "type": "float"},
             ],
         }
-
         parsed_schema = parse_schema(schema)
         self.counter += len(events)
         # Writing
-        with open(f"{self.filepath}/sensor.avro", "a+b") as out:
+        with open(f"{self.filepath}", "a+b") as out:
             writer(
                 out,
                 parsed_schema,
@@ -90,7 +77,7 @@ class QueueLocalAvro(QueueInterface):
                         "timestamp": e.ts,
                     }
                     for e in events
+                    if e
                 ],
                 codec="deflate",
             )
-        logging.info(f"Records written: {self.counter}")
